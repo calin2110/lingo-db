@@ -295,7 +295,6 @@ class SpecializeStringContains : public mlir::RewritePattern {
                               auto bwd = opBuilder5.create<mlir::scf::WhileOp>(location5, mlir::TypeRange{indexType}, mlir::ValueRange{maxSufMinusOne},
                                  [&](mlir::OpBuilder& opBuilder6, mlir::Location location6, mlir::ValueRange args2) {
                                     mlir::Value currentPos = args2[0];
-                                    // TODO: is this correct?
                                     mlir::Value inBounds;
                                     if (isEqual) {
                                        inBounds = opBuilder6.create<mlir::arith::CmpIOp>(location6, mlir::arith::CmpIPredicate::sge, currentPos, lastPtr);

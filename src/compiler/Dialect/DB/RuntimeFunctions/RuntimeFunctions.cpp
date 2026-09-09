@@ -179,8 +179,6 @@ mlir::Value constLikeWithUnderscoresImpl(mlir::OpBuilder& rewriter, mlir::ValueR
    using namespace mlir;
    mlir::Value haystack = loweredArguments[0];
    mlir::Value patternValue = loweredArguments[1];
-   // TODO: we had an if condition prior to this
-   // TODO: however, can we get there with this if condition false?
    auto constStrOp = mlir::dyn_cast_or_null<util::CreateConstVarLen>(patternValue.getDefiningOp());
    auto subpatterns = lingodb::compiler::dialect::db::parseLikePattern(constStrOp.getStr().str());
 

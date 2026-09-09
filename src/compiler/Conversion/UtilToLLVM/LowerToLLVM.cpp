@@ -490,7 +490,7 @@ class StringStartsWithLowering : public OpConversionPattern<util::StringStartsWi
          globalOp = rewriter.create<mlir::LLVM::GlobalOp>(loc, mlir::LLVM::LLVMArrayType::get(rewriter.getI8Type(), prefix.size()), true, mlir::LLVM::Linkage::Private, name, rewriter.getStringAttr(prefix));
       }
 
-      auto memcmpFn = LLVM::lookupOrCreateFn(op->getParentOfType<ModuleOp>(), "memcmp",{mlir::LLVM::LLVMPointerType::get(rewriter.getContext()), mlir::LLVM::LLVMPointerType::get(rewriter.getContext()), rewriter.getIntegerType(64)}, rewriter.getI32Type()).value(); //todo: check for error
+      auto memcmpFn = LLVM::lookupOrCreateFn(op->getParentOfType<ModuleOp>(), "memcmp",{mlir::LLVM::LLVMPointerType::get(rewriter.getContext()), mlir::LLVM::LLVMPointerType::get(rewriter.getContext()), rewriter.getIntegerType(64)}, rewriter.getI32Type()).value();
       Value prefixPtr = rewriter.create<mlir::LLVM::AddressOfOp>(loc, globalOp);
       Value prefixLen = rewriter.create<LLVM::ConstantOp>(loc, rewriter.getI64Type(), rewriter.getI64IntegerAttr(prefix.size()));
       Value start = rewriter.create<LLVM::GEPOp>(loc,  mlir::LLVM::LLVMPointerType::get(rewriter.getContext()), rewriter.getI8Type(), adaptor.getStr(), mlir::ValueRange{adaptor.getStartIndex()});
@@ -551,7 +551,7 @@ class StringEndsWithLowering : public OpConversionPattern<util::StringEndsWith> 
          globalOp = rewriter.create<mlir::LLVM::GlobalOp>(loc, mlir::LLVM::LLVMArrayType::get(rewriter.getI8Type(), suffix.size()), true, mlir::LLVM::Linkage::Private, name, rewriter.getStringAttr(suffix));
       }
 
-      auto memcmpFn = LLVM::lookupOrCreateFn(op->getParentOfType<ModuleOp>(), "memcmp",{mlir::LLVM::LLVMPointerType::get(rewriter.getContext()), mlir::LLVM::LLVMPointerType::get(rewriter.getContext()), rewriter.getIntegerType(64)}, rewriter.getI32Type()).value(); //todo: check for error
+      auto memcmpFn = LLVM::lookupOrCreateFn(op->getParentOfType<ModuleOp>(), "memcmp",{mlir::LLVM::LLVMPointerType::get(rewriter.getContext()), mlir::LLVM::LLVMPointerType::get(rewriter.getContext()), rewriter.getIntegerType(64)}, rewriter.getI32Type()).value();
       Value suffixPtr = rewriter.create<mlir::LLVM::AddressOfOp>(loc, globalOp);
       Value suffixLen = rewriter.create<LLVM::ConstantOp>(loc, rewriter.getI64Type(), rewriter.getI64IntegerAttr(suffix.size()));
 
