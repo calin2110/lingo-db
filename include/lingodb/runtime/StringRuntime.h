@@ -47,6 +47,8 @@ struct StringRuntime {
    static void cleanupUse(VarLen32 str);
    static void addUse(VarLen32 str);
    static VarLen32 promoteToGlobal(VarLen32 str);
+   static bool likeProgramWithUnderscores(VarLen32 str, const int32_t* program, VarLen32 data);
+   static bool compareEqWithUnderscores(VarLen32 str, VarLen32 data);
 };
 } // namespace lingodb::runtime
 #endif // LINGODB_RUNTIME_STRINGRUNTIME_H

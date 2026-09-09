@@ -48,6 +48,7 @@ else ()
     add_compile_definitions(ENABLE_REFCOUNT=0)
     message(STATUS "REFERENCE COUNTING DISABLED")
 endif ()
+add_compile_definitions(UNDERSCORE_REPLACEMENT=255)
 
 # Python UDF support: OFF (default), CPYTHON (embed system CPython), or WASM
 # (run a sandboxed CPython compiled to WebAssembly via the bundled cpython-wasm

@@ -14,6 +14,9 @@
 #include <variant>
 namespace lingodb::compiler::dialect::db {
 
+std::vector<std::basic_string<uint8_t>> parseLikePattern(const std::string& pattern);
+void preprocessSubpattern(const uint8_t* subpattern, size_t size, int32_t& period, int32_t& maxSuffix);
+
 struct RuntimeFunction {
    enum NullHandleType {
       HandlesNulls,

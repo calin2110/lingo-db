@@ -1043,6 +1043,33 @@ class OneOfLowering : public OpConversionPattern<db::OneOfOp> {
       return success();
    }
 };
+class ConstLikeLowering : public OpConversionPattern<db::ConstLikeOp> {
+   public:
+   using OpConversionPattern<db::ConstLikeOp>::OpConversionPattern;
+   LogicalResult matchAndRewrite(db::ConstLikeOp likeOp, OpAdaptor adaptor, ConversionPatternRewriter& rewriter) const override {
+      std::string pattern =  mlir::dyn_cast<mlir::StringAttr>(mlir::dyn_cast_or_null<db::ConstantOp>(likeOp.getPattern().getDefiningOp()).getValue()).str();
+      auto subpatterns = db::parseLikePattern(pattern);
+      auto toStringAttr = [&](const std::basic_string<uint8_t>& s) -> mlir::StringAttr {
+         return rewriter.getStringAttr(llvm::StringRef(reinterpret_cast<const char*>(s.data()), s.size()));
+      };
+      mlir::StringAttr prefixAttr = nullptr;
+      if (!subpatterns.front().empty())
+         prefixAttr = toStringAttr(subpatterns.front());
+      mlir::StringAttr suffixAttr = nullptr;
+      if (!subpatterns.back().empty())
+         suffixAttr = toStringAttr(subpatterns.back());
+
+      llvm::SmallVector<mlir::Attribute> subpatternAttrs;
+      for (size_t i = 1; i < subpatterns.size() - 1; ++i) {
+         subpatternAttrs.push_back(toStringAttr(subpatterns[i]));
+      }
+      mlir::ArrayAttr subpatternsAttr = rewriter.getArrayAttr(subpatternAttrs);
+      auto utilLikeOp = rewriter.create<util::LikeOp>(likeOp.getLoc(), rewriter.getI1Type(), adaptor.getVal(), prefixAttr, suffixAttr, subpatternsAttr);
+      rewriter.replaceOp(likeOp, utilLikeOp);
+      return mlir::success();
+   }
+};
+
 class SortCompareLowering : public OpConversionPattern<db::SortCompare> {
    public:
    using OpConversionPattern<db::SortCompare>::OpConversionPattern;
@@ -1578,6 +1605,7 @@ void DBToStdLoweringPass::runOnOperation() {
    patterns.insert<CmpOpLowering>(typeConverter, ctxt);
    patterns.insert<BetweenLowering>(typeConverter, ctxt);
    patterns.insert<OneOfLowering>(typeConverter, ctxt);
+   patterns.insert<ConstLikeLowering>(typeConverter, ctxt);
    patterns.insert<SortCompareLowering>(typeConverter, ctxt);
 
    patterns.insert<NotOpLowering>(typeConverter, ctxt);

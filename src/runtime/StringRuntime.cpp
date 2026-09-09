@@ -8,6 +8,10 @@
 #include <arrow/type.h>
 #include <arrow/util/decimal.h>
 
+#ifdef __SSE4_2__
+#include <nmmintrin.h>
+#include <pmmintrin.h>
+#endif
 //taken from NoisePage
 // src: https://github.com/cmu-db/noisepage/blob/c2635d3360dd24a9f7a094b4b8bcd131d99f2d4b/src/execution/sql/operators/like_operators.cpp
 // (MIT License, Copyright (c) 2018 CMU Database Group)
@@ -93,6 +97,212 @@ bool iterativeLike(const char* str, size_t strLen, const char* pattern, size_t p
       nextChar(p, plen);
    }
    return slen == 0 && plen == 0;
+}
+
+const uint8_t* twoWaySearch(const uint8_t* haystack, int32_t searchLimit, const uint8_t* needle, int32_t needleLen, int32_t period, int32_t maxSuffix) {
+      // because searchLimit is the first index for which we can no longer match
+   // we find the first instance of the first two matching characters, but up to searchLimit, exclusive
+   const uint8_t* haystackStart = haystack;
+   const uint8_t* firstPositionStartEnd = haystack + searchLimit;
+   while (true) {
+      haystack = static_cast<const uint8_t*>(memchr(haystack, needle[0], firstPositionStartEnd - haystack));
+      if (!haystack)
+         return nullptr;
+      if (haystack[1] == needle[1])
+         break;
+      if (++haystack == firstPositionStartEnd)
+         return nullptr;
+   }
+   // move the haystack up to where we have found the start of the index
+   // move the haystackLength to agree with the previous haystack move (subtract the value of index)
+   // subtract 1 to make comparison inclusive now (search is up to hayStackLen, inclusive)
+   int32_t haystackLen = searchLimit - (haystack - haystackStart) - 1;
+
+   // equal distinguishes in which algorithm from the paper we are
+   // equal set to true => POSITIONS (Figure 8)
+   // equal set to false => POSITIONS-BIS (Figure 20)
+   bool equal = period & 1;
+   period >>= 1;
+
+   int32_t pos, lastPtr = -1;
+   int32_t resetPtr = needleLen - period - 1;
+   int32_t offset = 0;
+
+   if (!equal) {
+      // http://monge.univ-mlv.fr/~mac/Articles-PDF/CP-1991-jacm.pdf, algorithm POSITIONS-BIS (Figure 20)
+      // period corresponds to q
+      // maxSuffix corresponds to l
+      // haystackLen corresponds to the last position (inclusive) where matching all the patterns may start
+      // offset corresponds to pos
+      // pos corresponds to i and j
+      // pre-requisites for the paper code: `period` is at most the period of the needle and `maxSuffix` is a critical position satisfying strictly smaller than the period of the needle
+      while (offset <= haystackLen) {
+         pos = maxSuffix + 1;
+         while (pos < needleLen && needle[pos] == haystack[pos + offset]) {
+            pos++;
+         }
+         if (pos < needleLen) {
+            offset += pos - maxSuffix;
+         } else {
+            pos = maxSuffix;
+            while (pos >= 0 && needle[pos] == haystack[pos + offset]) {
+               pos--;
+            }
+            if (pos >= 0) {
+               offset += period;
+            } else {
+               return haystack + offset;
+            }
+         }
+      }
+   } else {
+      // http://monge.univ-mlv.fr/~mac/Articles-PDF/CP-1991-jacm.pdf, algorithm POSITIONS (Figure 8)
+      // lastPtr represents the value of s from the code
+      // resetPtr corresponds to the value in the right-hand side of Line 9, accounted for 0-indexing rather than 0 indexing
+      // period corresponds to p
+      // maxSuffix corresponds to l
+      // haystackLen corresponds to the last position (inclusive) where matching all the patterns may start
+      // offset corresponds to pos
+      // pos corresponds to i and j
+      // pre-requisites for the paper code: `period` is a period of the needle and `maxSuffix` is a critical position satisfying `maxSuffix < period`
+      // but then, `pos - maxSuffix > pos - period >= lastPtr - period + 1`, so we can skip the max on line 4 entirely
+      while (offset <= haystackLen) {
+         pos = std::max(maxSuffix, lastPtr) + 1;
+         while (pos < needleLen && needle[pos] == haystack[pos + offset]) {
+            pos++;
+         }
+         if (pos < needleLen) {
+            lastPtr = -1;
+            offset += pos - maxSuffix;
+         } else {
+            // match.
+            pos = maxSuffix;
+            while (pos > lastPtr && needle[pos] == haystack[pos + offset]) {
+               pos--;
+            }
+            if (pos > lastPtr) {
+               lastPtr = resetPtr;
+               offset += period;
+            } else {
+               return haystack + offset;
+            }
+         }
+      }
+   }
+   return nullptr;
+}
+
+#ifdef __SSE4_2__
+const uint8_t* simdSearch(const uint8_t* haystack, const uint8_t* haystackEnd, const uint8_t* needle, int32_t needleLen) {
+   __m128i needleSIMD;
+   {
+      alignas(16) uint8_t bytes[16] = {0};
+      memcpy(bytes, needle, needleLen);
+      needleSIMD = _mm_load_si128(reinterpret_cast<const __m128i*>(bytes));
+   }
+
+   int32_t lastFullMatchIndex = 16 - needleLen;
+   while (haystack + 16 <= haystackEnd) {
+      __m128i haystackSIMD = _mm_loadu_si128(reinterpret_cast<const __m128i_u*>(haystack));
+      int match = _mm_cmpistri(needleSIMD, haystackSIMD, _SIDD_UBYTE_OPS | _SIDD_CMP_EQUAL_ORDERED);
+      if (match <= lastFullMatchIndex) {
+         return haystack + match;
+      }
+      haystack += match;
+   }
+   haystack = haystackEnd - 16;
+   __m128i haystackSIMD = _mm_loadu_si128(reinterpret_cast<const __m128i_u*>(haystack));
+   int match = _mm_cmpistri(needleSIMD, haystackSIMD, _SIDD_UBYTE_OPS | _SIDD_CMP_EQUAL_ORDERED);
+   return match <= lastFullMatchIndex ? haystack + match : nullptr;
+}
+#endif
+
+const uint8_t* hybridSearch(const uint8_t* haystack, int32_t searchLimit, const uint8_t* needle, int32_t needleLen, int32_t period, int32_t maxSuffix) {
+   if (!needleLen)
+      return haystack;
+
+   if (needleLen == 1)
+      return static_cast<const uint8_t*>(memchr(haystack, needle[0], searchLimit));
+
+   #ifdef __SSE4_2__
+   if (needleLen <= 12) {
+      const uint8_t* haystackEnd = haystack + searchLimit + needleLen - 1;
+      if (haystackEnd - haystack >= 16)
+         return simdSearch(haystack, haystackEnd, needle, needleLen);
+   }
+   #endif
+   return twoWaySearch(haystack, searchLimit, needle, needleLen, period, maxSuffix);
+}
+
+inline constexpr uint8_t kUtf8Len[32] = {
+   1,1,1,1,1,1,1,1,  1,1,1,1,1,1,1,1,   // 0x00-0x7F
+   1,1,1,1,1,1,1,1,                     // 0x80-0xBF continuation
+   2,2,2,2,                             // 0xC0-0xDF
+   3,3,                                 // 0xE0-0xEF
+   4,                                   // 0xF0-0xF7
+   1                                    // 0xF8-0xFF invalid
+};
+
+constexpr uint8_t getLengthOfUTF8Sequence(uint8_t firstByte) noexcept {
+   return kUtf8Len[firstByte >> 3];
+}
+
+constexpr uint8_t getMaxUtf8Length() noexcept {
+   uint8_t maxLen = 0;
+   for (uint8_t value: kUtf8Len) {
+      maxLen = value > maxLen ? value : maxLen;
+   }
+   return maxLen;
+}
+
+const uint8_t* movePointerToCharacterStart(const uint8_t* reader) {
+   while (((*reader) & 0xC0) == 0x80) {
+      --reader;
+   }
+   return reader;
+}
+
+const uint8_t* likeProgramWithUnderscoresStep(const uint8_t* haystack, const uint8_t* haystackEnd, const uint8_t* pattern, const uint8_t* patternEnd, int32_t bufferLen, int32_t sums, int32_t period, int32_t maxSuffix) {
+   while (true) {
+      checkAgain:
+      if ((haystackEnd - haystack) < sums)
+         return nullptr;
+      int32_t searchLimit = (haystackEnd - haystack)  - sums + 1;
+      haystack = hybridSearch(haystack, searchLimit, pattern, bufferLen, period, maxSuffix);
+      if (!haystack || ((haystackEnd - haystack) < sums))
+         return nullptr;
+
+      const uint8_t* reader = haystack + bufferLen;
+      int32_t numSteps = 0;
+      for (const uint8_t* iter = pattern + bufferLen; iter != patternEnd; ++iter) {
+         if (reader == haystackEnd)
+            return nullptr;
+         uint8_t c = *iter;
+         // in case of an actual underscore, move the pointer after the current character
+         if (c == UNDERSCORE_REPLACEMENT) {
+            reader += getLengthOfUTF8Sequence(*reader);
+            numSteps += getMaxUtf8Length();
+            continue;
+         }
+
+         // in case of a real character, if matching, move forward
+         // otherwise, find the first appearance of this mismatched character and align it pessimistically with our current pattern
+         // by pessimistically, I mean that we assume all single underscore characters have their maximum lengths of 6 (this is used by numSteps)
+         // trivially, we aim to move only forward
+         if (*reader != c) {
+            const uint8_t* next = static_cast<const uint8_t*>(memchr(reader, c, haystackEnd - reader));
+            if (!next)
+               return nullptr;
+            const uint8_t* candidate = next - numSteps - bufferLen;
+            haystack = std::max(haystack + 1, candidate);
+            goto checkAgain;;
+         }
+         ++reader;
+         ++numSteps;
+      }
+      return reader;
+   }
+   return nullptr;
 }
 } // namespace
 //end taken from noisepage
@@ -537,3 +747,136 @@ void lingodb::runtime::StringRuntime::addUse(VarLen32 str) {
 lingodb::runtime::VarLen32 lingodb::runtime::StringRuntime::promoteToGlobal(lingodb::runtime::VarLen32 str) {
    return lingodb::runtime::VarLen32::promoteToGlobal(str);
 }
+
+bool lingodb::runtime::StringRuntime::likeProgramWithUnderscores(VarLen32 str, const int32_t* program, VarLen32 data){
+   int32_t patternCount = *(program++);
+   int32_t sums = program[2 + patternCount];
+   int32_t size = str.getLen();
+   if (size < sums) {
+      return false;
+   }
+   const uint8_t* begin = str.getPtr();
+   const uint8_t* end = begin + size;
+
+   uint8_t* patterns = data.getPtr();
+   int32_t prefixLen = *(program++);
+   int32_t suffixLen = *(program++);
+   const int32_t* twoWaySearchData = program + patternCount + 1;
+
+   if (prefixLen != 0) {
+      int32_t lengthUntilFirstUnderscore = *(twoWaySearchData++);
+      if (memcmp(begin, patterns, lengthUntilFirstUnderscore) != 0) {
+         return false;
+      }
+      begin += lengthUntilFirstUnderscore;
+      int32_t index = lengthUntilFirstUnderscore;
+      while (index < prefixLen) {
+         uint8_t c = patterns[index];
+         if (begin == end)
+            return false;
+         if (c == UNDERSCORE_REPLACEMENT) {
+            begin += getLengthOfUTF8Sequence(*begin);
+         } else if (c != *(begin++))
+            return false;
+         ++index;
+      }
+
+      patterns += prefixLen;
+      sums -= prefixLen;
+   }
+
+   if (suffixLen != 0) {
+      int32_t lengthAfterLastUnderscore = *(twoWaySearchData++);
+      if ((end - begin) < sums)
+         return false;
+      if (memcmp(end - lengthAfterLastUnderscore, patterns + suffixLen - lengthAfterLastUnderscore, lengthAfterLastUnderscore) != 0) {
+         return false;
+      }
+      int32_t index = suffixLen - lengthAfterLastUnderscore - 1;
+      const uint8_t* iter = end - lengthAfterLastUnderscore - 1;
+      while (index >= 0) {
+         uint8_t c = patterns[index];
+         if (iter < begin)
+            return false;
+         if (c == UNDERSCORE_REPLACEMENT) {
+            iter = movePointerToCharacterStart(iter);
+            --iter;
+         }
+         else if (c != *(iter--))
+            return false;
+         --index;
+      }
+
+      patterns += suffixLen;
+      end = iter + 1;
+      sums -= suffixLen;
+   }
+
+   for (int32_t index = 0; index < patternCount; ++index) {
+
+      int32_t needleLen = *(program++);
+      int32_t textLen = end - begin;
+
+      if (textLen < sums)
+         return false;
+
+      int32_t numStartUnderscores = *(twoWaySearchData++);
+      for (int32_t i = 0; i < numStartUnderscores; ++i) {
+         if (begin == end) {
+            return false;
+         }
+         begin += getLengthOfUTF8Sequence(*begin);
+      }
+
+      sums -= numStartUnderscores;
+      patterns += numStartUnderscores;
+      int32_t firstSubpatternLength = *(twoWaySearchData++);
+      int32_t period = *(twoWaySearchData++);
+      int32_t maxSuffix = *(twoWaySearchData++);
+      if (firstSubpatternLength == 0) {
+         continue;
+      }
+      textLen = end - begin;
+      if (textLen < sums)
+         return false;
+
+
+      if (numStartUnderscores + firstSubpatternLength == needleLen) {
+         int32_t searchLimit = textLen - sums + 1;
+         const uint8_t* sep = twoWaySearch(begin, searchLimit, patterns, firstSubpatternLength, period, maxSuffix);
+         if (!sep) {
+            return false;
+         }
+         begin = sep + firstSubpatternLength;
+         patterns += firstSubpatternLength;
+         sums -= firstSubpatternLength;
+      } else {
+         begin = likeProgramWithUnderscoresStep(begin, end, patterns, patterns + needleLen - numStartUnderscores, firstSubpatternLength, sums, period, maxSuffix);
+         if (!begin)
+            return false;
+         patterns += (needleLen - numStartUnderscores);
+         sums -= (needleLen - numStartUnderscores);
+      }
+   }
+   return true;
+}
+
+bool lingodb::runtime::StringRuntime::compareEqWithUnderscores(VarLen32 str, VarLen32 data){
+   uint8_t* haystack = str.getPtr();
+   uint8_t* haystackEnd = str.getPtr() + str.getLen();
+   uint8_t* needle = data.getPtr();
+   uint8_t* needleEnd = data.getPtr() + data.getLen();
+   while (haystack < haystackEnd && needle < needleEnd) {
+      if (*needle == UNDERSCORE_REPLACEMENT) {
+         haystack += getLengthOfUTF8Sequence(*haystack);
+      } else {
+         if (*haystack != *needle) {
+            return false;
+         }
+         ++haystack;
+      }
+      ++needle;
+   }
+   return haystack == haystackEnd && needle == needleEnd;
+}
+
